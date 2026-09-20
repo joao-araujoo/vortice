@@ -1,6 +1,6 @@
 # Privacidade
 
-O Vórtice 4.4.1 Public Beta é local-first e não implementa telemetria própria.
+O Vórtice 4.4.2 Public Beta é local-first e não implementa telemetria própria.
 
 ## O que fica local
 

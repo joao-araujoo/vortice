@@ -5,7 +5,7 @@
   "notificationsEnabled": true,
   "soundsEnabled": true,
   "automationMode": "assist",
-  "companionToken": "3317b1ffdb0f47328ce8c117bee93616",
+  "companionToken": "",
   "autopilotRetry": false,
   "publicWelcomeShown": false,
   "publicWelcomeVersion": "",

@@ -35,7 +35,7 @@ from companion import CompanionBridge, ensure_extension_files
 
 
 APP_NAME = "Vórtice"
-APP_VERSION = "4.4.1"
+APP_VERSION = "4.4.2"
 APP_EDITION = "Public Beta"
 REPO_URL = "https://github.com/joao-araujoo/vortice"
 PUBLIC_RELEASE = True
@@ -2058,52 +2058,104 @@ def format_reset_time(timestamp) -> str:
         return ""
 
 
+def _normalize_codex_path_text(value: str) -> str:
+    """Normalize paths copied from shells/settings without keeping wrapping quotes."""
+    text = os.path.expandvars(str(value or "").strip())
+    if text.startswith("& "):
+        text = text[2:].strip()
+    # A few Windows installers/shell snippets surface a quoted executable path.
+    # Persist only the real path so subprocess receives a clean argv[0].
+    for _ in range(3):
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'"}:
+            text = text[1:-1].strip()
+        else:
+            break
+    return text
+
+
 def _codex_candidate_paths() -> list[Path]:
-    """Return likely Codex CLI locations without depending on the current process PATH."""
+    """Return likely Codex CLI locations without trusting only the current PATH."""
     candidates: list[Path] = []
 
-    settings = load_settings()
-    configured = str(settings.get("codexPath") or "").strip()
-    if configured:
-        candidates.append(Path(configured).expanduser())
+    def add(value) -> None:
+        text = _normalize_codex_path_text(str(value or ""))
+        if text:
+            candidates.append(Path(text).expanduser())
 
-    env_path = str(os.environ.get("CODEX_CLI_PATH") or "").strip()
-    if env_path:
-        candidates.append(Path(env_path).expanduser())
+    settings = load_settings()
+    add(settings.get("codexPath"))
+    add(os.environ.get("CODEX_CLI_PATH"))
 
     if os.name == "nt":
         local = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
         roaming = Path(os.environ.get("APPDATA") or (Path.home() / "AppData" / "Roaming"))
         codex_home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
+        user = Path.home()
 
-        # Official standalone installer (current Windows recommendation).
+        # Official standalone installer. OpenAI currently installs the visible
+        # Windows command here by default.
         candidates.extend([
             local / "Programs" / "OpenAI" / "Codex" / "bin" / "codex.exe",
-            codex_home / "packages" / "standalone" / "current" / "bin" / "codex.exe",
+            local / "Programs" / "OpenAI" / "Codex" / "bin" / "codex.cmd",
             codex_home / "bin" / "codex.exe",
+            codex_home / "bin" / "codex.cmd",
         ])
 
-        # Codex / ChatGPT desktop runtime. This path is useful when the desktop
-        # app is installed but its bundled CLI was not added to PATH.
+        # Standalone package cache layout can change between releases. Looking
+        # only inside CODEX_HOME keeps this bounded and avoids scanning the disk.
+        standalone_root = codex_home / "packages" / "standalone"
+        if standalone_root.is_dir():
+            try:
+                cached = list(standalone_root.glob("**/codex.exe"))
+                cached.sort(key=lambda item: item.stat().st_mtime if item.exists() else 0, reverse=True)
+                candidates.extend(cached[:8])
+            except Exception:
+                pass
+
+        # Desktop runtimes / common package-manager shims.
         candidates.extend([
             local / "OpenAI" / "Codex" / "bin" / "codex.exe",
             local / "OpenAI" / "ChatGPT" / "bin" / "codex.exe",
-        ])
-
-        # Common npm global shim locations.
-        candidates.extend([
             roaming / "npm" / "codex.cmd",
             roaming / "npm" / "codex.exe",
             local / "npm" / "codex.cmd",
             local / "npm" / "codex.exe",
+            local / "Microsoft" / "WinGet" / "Links" / "codex.exe",
+            user / "scoop" / "shims" / "codex.exe",
+            user / "scoop" / "shims" / "codex.cmd",
+            user / ".local" / "bin" / "codex.exe",
         ])
 
-    # PATH last: it can contain stale npm shims, while the standalone path above
-    # points at the installation Vórtice actually wants to use.
+        # Custom npm prefixes are common on developer machines. Asking npm for
+        # its prefix lets an already-installed Codex work even when Explorer's
+        # PATH is older than the terminal where npm was configured.
+        npm = shutil.which("npm.cmd") or shutil.which("npm.exe") or shutil.which("npm")
+        if npm:
+            try:
+                result = run_hidden([npm, "config", "get", "prefix"], timeout=10)
+                if result.returncode == 0:
+                    prefix_text = (result.stdout or "").strip().splitlines()
+                    if prefix_text:
+                        prefix = Path(_normalize_codex_path_text(prefix_text[-1])).expanduser()
+                        candidates.extend([prefix / "codex.cmd", prefix / "codex.exe", prefix / "bin" / "codex"])
+            except Exception:
+                pass
+
+        # `where.exe` can return more than one shim. Keep all of them and probe
+        # each one instead of trusting the first stale entry.
+        try:
+            result = run_hidden(["where.exe", "codex"], timeout=8)
+            if result.returncode == 0:
+                for line in (result.stdout or "").splitlines():
+                    add(line)
+        except Exception:
+            pass
+
+    # PATH last: known standalone locations above are more deterministic.
     for name in ("codex.exe", "codex.cmd", "codex.ps1", "codex"):
         source = shutil.which(name)
         if source:
-            candidates.append(Path(source))
+            add(source)
 
     unique: list[Path] = []
     seen: set[str] = set()
@@ -2118,23 +2170,8 @@ def _codex_candidate_paths() -> list[Path]:
     return unique
 
 
-def resolve_codex_source() -> Optional[str]:
-    for candidate in _codex_candidate_paths():
-        try:
-            if candidate.is_file():
-                return str(candidate)
-        except Exception:
-            continue
-    return None
-
-
-def save_codex_override(path: str = "") -> None:
-    settings = load_settings()
-    settings["codexPath"] = str(path or "").strip()
-    save_settings(settings)
-
-
 def codex_command(source: str, args: list[str]) -> list[str]:
+    source = _normalize_codex_path_text(source)
     suffix = Path(source).suffix.lower()
     if os.name == "nt" and suffix in {".cmd", ".bat"}:
         line = subprocess.list2cmdline([source, *args])
@@ -2147,6 +2184,58 @@ def codex_command(source: str, args: list[str]) -> list[str]:
     return [source, *args]
 
 
+def _probe_codex_source(source: str, timeout: int = 15) -> tuple[bool, str]:
+    source = _normalize_codex_path_text(source)
+    if not source:
+        return False, "caminho vazio"
+    try:
+        path = Path(source).expanduser()
+        if not path.is_file():
+            return False, "arquivo não existe"
+        result = run_hidden(codex_command(str(path), ["--version"]), timeout=timeout)
+        output = f"{result.stdout}\n{result.stderr}".strip()
+        if result.returncode == 0:
+            return True, (output.splitlines()[0] if output else "Codex")
+        return False, output or f"codex --version saiu com código {result.returncode}"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _prepend_codex_to_process_path(source: str) -> None:
+    try:
+        folder = str(Path(_normalize_codex_path_text(source)).resolve().parent)
+        current = str(os.environ.get("PATH") or "")
+        parts = [item for item in current.split(os.pathsep) if item]
+        if folder and all(item.lower() != folder.lower() for item in parts):
+            os.environ["PATH"] = folder + os.pathsep + current
+    except Exception:
+        pass
+
+
+def resolve_codex_source() -> Optional[str]:
+    """Prefer a CLI that actually starts; fall back to a found-but-broken path for repair UI."""
+    existing: list[str] = []
+    for candidate in _codex_candidate_paths():
+        try:
+            if not candidate.is_file():
+                continue
+            source = str(candidate)
+            existing.append(source)
+            working, _ = _probe_codex_source(source, timeout=12)
+            if working:
+                _prepend_codex_to_process_path(source)
+                return source
+        except Exception:
+            continue
+    return existing[0] if existing else None
+
+
+def save_codex_override(path: str = "") -> None:
+    settings = load_settings()
+    settings["codexPath"] = _normalize_codex_path_text(path)
+    save_settings(settings)
+
+
 def codex_status() -> dict:
     source = resolve_codex_source()
     if not source:
@@ -2155,25 +2244,15 @@ def codex_status() -> dict:
             "version": "", "source": None, "auth": "", "error": "",
         }
 
-    version = ""
-    version_error = ""
-    try:
-        result = run_hidden(codex_command(source, ["--version"]), timeout=20)
-        output = f"{result.stdout}\n{result.stderr}".strip()
-        if result.returncode != 0:
-            version_error = output or f"codex --version saiu com código {result.returncode}"
-        else:
-            version = output.splitlines()[0] if output else "Codex"
-    except Exception as exc:
-        version_error = str(exc)
-
-    if version_error:
+    working, version_or_error = _probe_codex_source(source, timeout=20)
+    if not working:
         return {
             "installed": True, "working": False, "authenticated": False,
-            "version": version or "Codex", "source": source, "auth": "",
-            "error": version_error,
+            "version": "Codex", "source": source, "auth": "",
+            "error": version_or_error,
         }
 
+    version = version_or_error or "Codex"
     auth = ""
     auth_code = 1
     try:
@@ -2194,53 +2273,110 @@ def codex_status() -> dict:
         "installed": True,
         "working": True,
         "authenticated": authenticated,
-        "version": version or "Codex",
+        "version": version,
         "source": source,
         "auth": auth,
         "error": "",
     }
 
 
+def _try_npm_codex_fallback() -> tuple[bool, str]:
+    """Fallback only for machines that already have npm; standalone remains the default."""
+    if os.name != "nt":
+        return False, ""
+    npm = shutil.which("npm.cmd") or shutil.which("npm.exe") or shutil.which("npm")
+    if not npm:
+        return False, ""
+    try:
+        result = run_hidden([npm, "install", "-g", "@openai/codex@latest"], timeout=900)
+    except Exception as exc:
+        return False, f"Fallback npm: {exc}"
+    output = f"{result.stdout}\n{result.stderr}".strip()
+    source = resolve_codex_source()
+    if source:
+        working, version = _probe_codex_source(source, timeout=20)
+        if working:
+            save_codex_override(source)
+            _prepend_codex_to_process_path(source)
+            return True, f"Codex validado por {source}\n{version}"
+    if result.returncode != 0:
+        return False, output[-1600:]
+    return False, "npm terminou, mas nenhuma Codex CLI funcional foi localizada."
+
+
 def install_codex_official() -> tuple[bool, str]:
-    """Install the official standalone Codex CLI on Windows, without requiring Node/npm."""
+    """Install/repair Codex and trust the binary, not the installer's final verification step."""
     if os.name != "nt":
         return False, "A instalação automática desta versão está disponível no Windows."
+
+    # Explicit install dir matches OpenAI's documented Windows default. Some
+    # versions of install.ps1 have failed only in their final self-check after
+    # codex.exe was already written; Vórtice therefore validates the executable
+    # itself before deciding whether installation really failed.
     script = (
         "$ErrorActionPreference='Stop'; "
         "$ProgressPreference='SilentlyContinue'; "
         "$env:CODEX_NON_INTERACTIVE='1'; "
+        "$env:CODEX_INSTALL_DIR=Join-Path $env:LOCALAPPDATA 'Programs\\OpenAI\\Codex\\bin'; "
+        "New-Item -ItemType Directory -Force -Path $env:CODEX_INSTALL_DIR | Out-Null; "
         "irm https://chatgpt.com/codex/install.ps1 | iex"
     )
+    result = None
+    install_exception = ""
     try:
         result = run_hidden([
             "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
             "-Command", script,
         ], timeout=900)
     except subprocess.TimeoutExpired:
-        return False, "A instalação do Codex demorou mais de 15 minutos."
+        install_exception = "A instalação do Codex demorou mais de 15 minutos."
     except Exception as exc:
-        return False, str(exc)
-    output = f"{result.stdout}\n{result.stderr}".strip()
-    if result.returncode != 0:
-        return False, output[-2400:] or f"Instalador encerrou com código {result.returncode}."
+        install_exception = str(exc)
 
+    output = ""
+    return_code = None
+    if result is not None:
+        output = f"{result.stdout}\n{result.stderr}".strip()
+        return_code = int(result.returncode)
+
+    # IMPORTANT: verify even when install.ps1 exits non-zero. The official
+    # installer may already have downloaded a perfectly usable codex.exe before
+    # failing in its own PowerShell verification command.
     source = resolve_codex_source()
     if source:
-        try:
-            save_codex_override(source)
-        except Exception:
-            pass
-        return True, output[-1800:] if output else "Codex instalado."
-    return False, (
-        "O instalador terminou, mas o Vórtice ainda não encontrou codex.exe. "
-        "Use “Localizar Codex” ou reinicie o Vórtice."
+        working, version = _probe_codex_source(source, timeout=20)
+        if working:
+            try:
+                save_codex_override(source)
+                _prepend_codex_to_process_path(source)
+            except Exception:
+                pass
+            note = f"Codex instalado e validado.\n{version}\n{source}"
+            if return_code not in (None, 0):
+                note += "\n\nO instalador oficial terminou com um aviso na etapa final, mas o executável foi validado diretamente pelo Vórtice."
+            return True, note
+
+    # Existing Node/npm users get an automatic official npm fallback. We never
+    # install Node just for this; machines without npm stay on the standalone path.
+    npm_ok, npm_output = _try_npm_codex_fallback()
+    if npm_ok:
+        return True, npm_output
+
+    details = install_exception or output[-2400:] or (
+        f"Instalador encerrou com código {return_code}." if return_code is not None else "Erro desconhecido."
     )
+    if npm_output:
+        details += "\n\nFallback npm:\n" + npm_output[-1200:]
+    return False, details
 
 
 def launch_codex_interactive(args: list[str]) -> bool:
     """Open Codex in a visible console for login/doctor flows."""
     source = resolve_codex_source()
     if not source or os.name != "nt":
+        return False
+    working, _ = _probe_codex_source(source, timeout=15)
+    if not working:
         return False
     suffix = Path(source).suffix.lower()
     flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
@@ -2258,6 +2394,29 @@ def launch_codex_interactive(args: list[str]) -> bool:
         return True
     except Exception:
         return False
+
+
+def codex_diagnostics_text() -> str:
+    status = codex_status()
+    candidates = []
+    for candidate in _codex_candidate_paths():
+        try:
+            if candidate.is_file():
+                ok, info = _probe_codex_source(str(candidate), timeout=8)
+                candidates.append(f"- {'OK' if ok else 'FALHA'} | {candidate} | {info[:180]}")
+        except Exception:
+            continue
+    return "\n".join([
+        f"Vortice {APP_VERSION}",
+        f"Codex instalado: {bool(status.get('installed'))}",
+        f"Codex funcional: {bool(status.get('working'))}",
+        f"Codex autenticado: {bool(status.get('authenticated'))}",
+        f"Fonte escolhida: {status.get('source') or '-'}",
+        f"Versao: {status.get('version') or '-'}",
+        f"Erro: {status.get('error') or '-'}",
+        "Candidatos encontrados:",
+        *(candidates or ["- nenhum arquivo encontrado"]),
+    ])
 
 
 def bridge_schema() -> dict:
@@ -4565,7 +4724,8 @@ class CodexSetupDialog(tk.Toplevel):
             body,
             text=(
                 "Para COZINHAR CONTEXTO e usar o Vórtex, o Vórtice precisa da Codex CLI oficial. "
-                "No Setup do Vórtice você não precisa instalar Python. Git e VS Code são opcionais."
+                "Se você já usa Codex no terminal, primeiro clique em Verificar: o Vórtice tenta localizar e validar sozinho. "
+                "Só use Instalar / reparar se continuar vermelho. Python já vem no Setup; Git e VS Code são opcionais."
             ),
             bg=C["paper"], fg=C["muted"], font=(FONT, 9),
             wraplength=690, justify="left",
@@ -4597,7 +4757,7 @@ class CodexSetupDialog(tk.Toplevel):
         self.actions = tk.Frame(card, bg=C["card"])
         self.actions.pack(fill="x")
         self.install_btn = make_button(
-            self.actions, "⬇ Instalar Codex oficial", self.install_codex,
+            self.actions, "⬇ Instalar / reparar Codex", self.install_codex,
             bg=C["violet"], fg=C["white"], active_bg="#6654E8",
             font=(FONT, 8, "bold"), padx=12, pady=8,
         )
@@ -4628,6 +4788,11 @@ class CodexSetupDialog(tk.Toplevel):
             font=(FONT, 7, "bold"), padx=8, pady=6,
         )
         self.doctor_btn.pack(side="left", padx=(5, 0))
+        make_button(
+            actions2, "Copiar diagnóstico", self.copy_diagnostics,
+            bg=C["card"], fg=C["muted"], active_bg="#F1EEE8",
+            font=(FONT, 7, "bold"), padx=8, pady=6,
+        ).pack(side="left", padx=(5, 0))
         make_button(
             actions2, "Documentação oficial", self.open_docs,
             bg=C["card"], fg=C["muted"], active_bg="#F1EEE8",
@@ -4729,7 +4894,7 @@ class CodexSetupDialog(tk.Toplevel):
             self.feedback.configure(text="Pode instalar daqui mesmo. O instalador é o standalone oficial da OpenAI.", fg=C["muted"])
 
         self.detail_label.configure(text=detail)
-        self.install_btn.configure(text="↻ Reinstalar Codex oficial" if installed else "⬇ Instalar Codex oficial")
+        self.install_btn.configure(text="↻ Atualizar / reparar Codex" if installed else "⬇ Instalar / reparar Codex")
         self.login_btn.configure(state=("normal" if installed and working and not authenticated else "disabled"))
         self.doctor_btn.configure(state=("normal" if installed and working else "disabled"))
         self.install_btn.configure(state="normal")
@@ -4753,7 +4918,7 @@ class CodexSetupDialog(tk.Toplevel):
 
     def _install_done(self, ok: bool, output: str) -> None:
         if ok:
-            self.feedback.configure(text="Codex instalado ✓ Agora falta entrar com sua conta do ChatGPT.", fg=C["green"])
+            self.feedback.configure(text="Codex instalado e validado ✓ Conferindo agora se o login já está pronto…", fg=C["green"])
         else:
             messagebox.showerror(
                 APP_NAME,
@@ -4785,9 +4950,28 @@ class CodexSetupDialog(tk.Toplevel):
         )
         if not chosen:
             return
+        working, info = _probe_codex_source(chosen, timeout=20)
+        if not working:
+            messagebox.showerror(
+                APP_NAME,
+                "Esse arquivo existe, mas não respondeu como uma Codex CLI válida.\n\n" + str(info or "Falha ao executar codex --version."),
+                parent=self,
+            )
+            return
         save_codex_override(chosen)
-        self.feedback.configure(text="Caminho salvo. Verificando…", fg=C["violet"])
+        _prepend_codex_to_process_path(chosen)
+        self.feedback.configure(text=f"Codex validado: {info}. Verificando login…", fg=C["violet"])
         self.refresh_async()
+
+    def copy_diagnostics(self) -> None:
+        try:
+            text = codex_diagnostics_text()
+            self.clipboard_clear()
+            self.clipboard_append(text)
+            self.update()
+            self.feedback.configure(text="Diagnóstico do Codex copiado ✓", fg=C["green"])
+        except Exception as exc:
+            messagebox.showerror(APP_NAME, f"Não consegui montar o diagnóstico.\n\n{exc}", parent=self)
 
     def open_docs(self) -> None:
         webbrowser.open_new_tab("https://developers.openai.com/codex/cli")
@@ -4869,7 +5053,7 @@ class SettingsDialog(tk.Toplevel):
             desc = "É a única dependência obrigatória para COZINHAR CONTEXTO e para o agente Vórtex."
         c=self._card(parent,title,desc)
         make_button(c,"Configurar / reparar Codex",lambda:self.parent_app.open_codex_setup(False),bg=C["violet"],fg=C["white"],active_bg="#6654E8",font=(FONT,8,"bold"),padx=11,pady=7).pack(anchor="w")
-        tk.Label(c,text="O Vórtice usa o instalador standalone oficial da OpenAI: não precisa instalar Node/npm só por causa dele.",bg=C["card"],fg=C["muted"],font=(FONT,8),wraplength=710,justify="left").pack(anchor="w",pady=(9,0))
+        tk.Label(c,text="Já tem Codex? O assistente testa as instalações existentes antes de baixar qualquer coisa. Se não tiver, usa o standalone oficial da OpenAI; npm só entra como fallback se já existir na máquina.",bg=C["card"],fg=C["muted"],font=(FONT,8),wraplength=710,justify="left").pack(anchor="w",pady=(9,0))
         c2=self._card(parent,"O QUE MAIS EU PRECISO?","Nada obrigatório para abrir o Vórtice. Git e VS Code são opcionais; Python já vem embutido no Setup/Portable.")
         tk.Label(c2,text="ChatGPT continua no navegador. Se o Codex estiver verde no topo, o fluxo principal já está pronto.",bg=C["card"],fg=C["ink"],font=(FONT,8),wraplength=710,justify="left").pack(anchor="w")
 
@@ -8587,6 +8771,10 @@ def self_test() -> int:
         assert normalize_chatgpt_chat_url("https://chatgpt.com/c/abc-123") == "https://chatgpt.com/c/abc-123"
         assert normalize_chatgpt_chat_url("https://chatgpt.com/g/g-demo/c/xyz_789?foo=1") == "https://chatgpt.com/g/g-demo/c/xyz_789"
         assert normalize_chatgpt_chat_url("https://example.com/c/nope") == ""
+
+        assert _normalize_codex_path_text("'C:\\Users\\Teste\\codex.exe'") == "C:\\Users\\Teste\\codex.exe"
+        probe_ok, probe_info = _probe_codex_source(sys.executable, timeout=10)
+        assert probe_ok, probe_info
 
     print("OK")
     return 0

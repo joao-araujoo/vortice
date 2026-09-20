@@ -1,4 +1,4 @@
-VÓRTICE PUBLIC BETA 4.4.1
+VÓRTICE PUBLIC BETA 4.4.2
 ==========================
 
 A documentação principal agora está em README.md.

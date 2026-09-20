@@ -1,18 +1,19 @@
-# Vórtice 4.4.1 · Public Beta 🌀
+# Vórtice 4.4.2 · Public Beta 🌀
 
-Esta é uma rodada de confiabilidade para instalação em máquinas novas.
+Esta rodada corrige a configuração do Codex no Windows para funcionar tanto em máquinas que **já possuem Codex** quanto em instalações novas.
 
 ### O que mudou
 
-- detecção do Codex no Windows ficou bem mais robusta;
-- reconhecimento do instalador standalone oficial em `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin`;
-- reconhecimento do `CODEX_HOME`, runtime local do Codex/ChatGPT e shims npm comuns;
-- caminho manual para `codex.exe` como fallback;
-- tutorial inicial agora instala/repara o Codex, abre o login com ChatGPT e oferece `codex doctor`;
-- Config ganhou a aba **Dependências**;
-- o status vermelho do Codex no topo agora é clicável e abre o assistente;
-- a tela de Automação pública deixou de mostrar uma opção que não podia ser alterada;
-- mensagens de erro apontam diretamente para o assistente de configuração.
+- o Vórtice não confia mais apenas no `PATH`: ele procura e valida instalações standalone, npm, CODEX_HOME, WinGet/Scoop e caminho manual;
+- candidatos antigos/quebrados não bloqueiam uma instalação válida encontrada depois;
+- caminhos copiados com aspas são normalizados antes da execução;
+- o instalador automático agora **sempre valida o `codex.exe` real**, mesmo quando `install.ps1` termina com erro na própria etapa final de verificação;
+- o diretório standalone documentado no Windows é usado explicitamente: `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin`;
+- se o standalone realmente falhar e npm já existir na máquina, o Vórtice tenta `@openai/codex` como fallback sem instalar Node por conta própria;
+- `Localizar codex.exe` só salva o arquivo depois de executar `codex --version` com sucesso;
+- novo botão **Copiar diagnóstico** no assistente do Codex;
+- `INSTALL-CODEX.bat` recebeu a mesma regra de recuperação: um erro tardio do instalador não invalida um binário funcional;
+- token do Companion volta a ser gerado localmente por instalação em vez de vir pré-preenchido no pacote público.
 
 ### Baixe assim
 

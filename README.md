@@ -18,7 +18,7 @@
 
 O **Vórtice** é um orquestrador desktop para desenvolvimento. Ele não tenta substituir seu editor, Git ou ChatGPT: organiza o caminho entre eles para você conseguir trabalhar em Tasks sem ficar montando ZIP, repetindo contexto, caçando arquivos e lembrando onde parou.
 
-> **Public Beta 4.4.1.** Gratuito, local-first e feito para Windows.
+> **Public Beta 4.4.2.** Gratuito, local-first e feito para Windows.
 
 ---
 
@@ -85,7 +85,7 @@ Baixe **[Vortice-Setup.exe](https://github.com/joao-araujoo/vortice/releases/lat
 - Na primeira abertura, o próprio Vórtice verifica a **Codex CLI oficial** e oferece **Instalar**, **Entrar com ChatGPT**, **Codex doctor** e **Localizar codex.exe**.
 - O instalador de Codex usado pelo assistente é o standalone oficial da OpenAI; você não precisa instalar Node/npm só para usar o Vórtice.
 
-> Se o topo mostrar **Codex não encontrado · configurar**, clique nele. A Public Beta 4.4.1 também reconhece instalações standalone em `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin`, instalações em `%USERPROFILE%\.codex`, o runtime do app Codex/ChatGPT e shims npm comuns.
+> Se o topo mostrar **Codex não encontrado · configurar**, clique nele. A Public Beta 4.4.2 valida cada instalação encontrada com `codex --version`, reconhece o standalone em `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin`, `CODEX_HOME`, npm/WinGet/Scoop e caminho manual. Se o instalador oficial terminar com erro apenas na própria verificação final, o Vórtice testa o `codex.exe` diretamente antes de considerar a instalação como falha.
 
 ### Portátil
 

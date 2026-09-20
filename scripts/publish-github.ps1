@@ -1,6 +1,6 @@
 param(
   [string]$RepoName = "vortice",
-  [string]$Version = "v4.4.1"
+  [string]$Version = "v4.4.2"
 )
 
 $ErrorActionPreference = "Stop"
@@ -198,7 +198,7 @@ Run-Checked -Exe $script:git -Arguments @("add", "-A") -ErrorMessage "Falha ao p
 & $script:git diff --cached --quiet
 $hasChanges = ($LASTEXITCODE -ne 0)
 if ($hasChanges) {
-  Run-Checked -Exe $script:git -Arguments @("commit", "-m", "chore: Vortice 4.4.1 Public Beta") -ErrorMessage "Falha ao criar o commit"
+  Run-Checked -Exe $script:git -Arguments @("commit", "-m", "chore: Vortice 4.4.2 Public Beta") -ErrorMessage "Falha ao criar o commit"
 } else {
   Write-Host "Nenhuma alteracao de arquivos para commitar. Continuando com o HEAD atual." -ForegroundColor DarkGray
 }
@@ -242,7 +242,7 @@ if (-not [string]::IsNullOrWhiteSpace($remoteTagText)) {
   }
 
   if ([string]::IsNullOrWhiteSpace($localTagText)) {
-    Run-Checked -Exe $script:git -Arguments @("tag", "-a", $Version, "-m", "Vortice 4.4.1 Public Beta") -ErrorMessage "Falha ao criar a tag $Version"
+    Run-Checked -Exe $script:git -Arguments @("tag", "-a", $Version, "-m", "Vortice 4.4.2 Public Beta") -ErrorMessage "Falha ao criar a tag $Version"
   }
   Run-Checked -Exe $script:git -Arguments @("push", "origin", $Version) -ErrorMessage "Falha ao enviar a tag $Version"
 }
