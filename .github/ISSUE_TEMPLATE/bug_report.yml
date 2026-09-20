@@ -1,0 +1,32 @@
+name: Bug
+about: Algo quebrou no Vórtice
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Versão
+      placeholder: 4.4.0
+    validations:
+      required: true
+  - type: dropdown
+    id: windows
+    attributes:
+      label: Windows
+      options: [Windows 11, Windows 10, Outro]
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: O que aconteceu?
+      description: Não envie tokens, chaves, .env ou código privado.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Como reproduzir?
+      placeholder: "1. ...\n2. ...\n3. ..."
+    validations:
+      required: true

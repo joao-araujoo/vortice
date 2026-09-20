@@ -1,0 +1,12 @@
+{
+  "agentName": "Vórtex",
+  "autoRollback": true,
+  "agentModel": "",
+  "notificationsEnabled": true,
+  "soundsEnabled": true,
+  "automationMode": "assist",
+  "companionToken": "",
+  "autopilotRetry": false,
+  "publicWelcomeShown": false,
+  "publicRelease": true
+}

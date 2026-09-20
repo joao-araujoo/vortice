@@ -1,0 +1,91 @@
+name: Windows Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: 'x64'
+
+      - name: Self-test
+        shell: pwsh
+        run: |
+          python -m py_compile app.py companion.py
+          python app.py --self-test
+
+      - name: Install PyInstaller
+        run: python -m pip install --upgrade pyinstaller
+
+      - name: Build Vórtice (onedir)
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean --onedir --windowed `
+            --name Vortice `
+            --icon "$pwd\assets\app.ico" `
+            --version-file "$pwd\installer\version_info.txt" `
+            --add-data "$pwd\assets;assets" `
+            "$pwd\app.py"
+
+      - name: Build portable ZIP
+        shell: pwsh
+        run: |
+          Copy-Item README.txt, LICENSE, PRIVACY.md, SECURITY.md -Destination "dist\Vortice"
+          New-Item -ItemType Directory -Force release | Out-Null
+          Compress-Archive -Path "dist\Vortice\*" -DestinationPath "release\Vortice-Portable.zip" -CompressionLevel Optimal
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "ISCC não encontrado em $iscc" }
+          & $iscc "installer\Vortice.iss"
+
+      - name: Checksums
+        shell: pwsh
+        run: |
+          $files = @("release\Vortice-Setup.exe", "release\Vortice-Portable.zip")
+          $lines = foreach ($f in $files) {
+            $h = Get-FileHash -Algorithm SHA256 $f
+            "$($h.Hash.ToLower())  $([IO.Path]::GetFileName($f))"
+          }
+          $lines | Set-Content -Encoding ascii "release\SHA256SUMS.txt"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Vortice-Windows
+          path: |
+            release/Vortice-Setup.exe
+            release/Vortice-Portable.zip
+            release/SHA256SUMS.txt
+
+      - name: GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Vórtice ${{ github.ref_name }} · Public Beta
+          body_path: RELEASE_NOTES.md
+          prerelease: false
+          files: |
+            release/Vortice-Setup.exe
+            release/Vortice-Portable.zip
+            release/SHA256SUMS.txt
