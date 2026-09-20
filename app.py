@@ -35,7 +35,7 @@ from companion import CompanionBridge, ensure_extension_files
 
 
 APP_NAME = "Vórtice"
-APP_VERSION = "4.4.0"
+APP_VERSION = "4.4.1"
 APP_EDITION = "Public Beta"
 REPO_URL = "https://github.com/joao-araujoo/vortice"
 PUBLIC_RELEASE = True
@@ -150,7 +150,7 @@ if not HISTORY_FILE.exists():
 if not DRAFTS_FILE.exists():
     DRAFTS_FILE.write_text("{}\n", encoding="utf-8")
 if not SETTINGS_FILE.exists():
-    SETTINGS_FILE.write_text(json.dumps({"agentName": "Vórtex", "autoRollback": True, "agentModel": "", "notificationsEnabled": True, "soundsEnabled": True, "automationMode": "assist", "companionToken": secrets.token_hex(16), "autopilotRetry": True}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    SETTINGS_FILE.write_text(json.dumps({"agentName": "Vórtex", "autoRollback": True, "agentModel": "", "notificationsEnabled": True, "soundsEnabled": True, "automationMode": "assist", "companionToken": secrets.token_hex(16), "autopilotRetry": True, "publicWelcomeShown": False, "publicWelcomeVersion": "", "codexPath": ""}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 if not AGENT_CHATS_FILE.exists():
     AGENT_CHATS_FILE.write_text("{}\n", encoding="utf-8")
 if not CHECKLIST_FILE.exists():
@@ -332,7 +332,7 @@ def save_drafts(drafts: dict[str, dict]) -> None:
 
 
 def load_settings() -> dict:
-    defaults = {"agentName": "Vórtex", "autoRollback": True, "agentModel": "", "notificationsEnabled": True, "soundsEnabled": True, "automationMode": "assist", "companionToken": "", "autopilotRetry": False, "publicWelcomeShown": False}
+    defaults = {"agentName": "Vórtex", "autoRollback": True, "agentModel": "", "notificationsEnabled": True, "soundsEnabled": True, "automationMode": "assist", "companionToken": "", "autopilotRetry": False, "publicWelcomeShown": False, "publicWelcomeVersion": "", "codexPath": ""}
     try:
         data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
         if isinstance(data, dict):
@@ -2058,25 +2058,80 @@ def format_reset_time(timestamp) -> str:
         return ""
 
 
-def resolve_codex_source() -> Optional[str]:
-    source = shutil.which("codex")
-    if source:
-        return source
+def _codex_candidate_paths() -> list[Path]:
+    """Return likely Codex CLI locations without depending on the current process PATH."""
+    candidates: list[Path] = []
+
+    settings = load_settings()
+    configured = str(settings.get("codexPath") or "").strip()
+    if configured:
+        candidates.append(Path(configured).expanduser())
+
+    env_path = str(os.environ.get("CODEX_CLI_PATH") or "").strip()
+    if env_path:
+        candidates.append(Path(env_path).expanduser())
+
     if os.name == "nt":
-        for name in ("codex.cmd", "codex.exe", "codex.ps1"):
-            source = shutil.which(name)
-            if source:
-                return source
-        # The official standalone installer keeps Codex under CODEX_HOME.
+        local = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+        roaming = Path(os.environ.get("APPDATA") or (Path.home() / "AppData" / "Roaming"))
         codex_home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
-        candidates = [
+
+        # Official standalone installer (current Windows recommendation).
+        candidates.extend([
+            local / "Programs" / "OpenAI" / "Codex" / "bin" / "codex.exe",
             codex_home / "packages" / "standalone" / "current" / "bin" / "codex.exe",
             codex_home / "bin" / "codex.exe",
-        ]
-        for candidate in candidates:
+        ])
+
+        # Codex / ChatGPT desktop runtime. This path is useful when the desktop
+        # app is installed but its bundled CLI was not added to PATH.
+        candidates.extend([
+            local / "OpenAI" / "Codex" / "bin" / "codex.exe",
+            local / "OpenAI" / "ChatGPT" / "bin" / "codex.exe",
+        ])
+
+        # Common npm global shim locations.
+        candidates.extend([
+            roaming / "npm" / "codex.cmd",
+            roaming / "npm" / "codex.exe",
+            local / "npm" / "codex.cmd",
+            local / "npm" / "codex.exe",
+        ])
+
+    # PATH last: it can contain stale npm shims, while the standalone path above
+    # points at the installation Vórtice actually wants to use.
+    for name in ("codex.exe", "codex.cmd", "codex.ps1", "codex"):
+        source = shutil.which(name)
+        if source:
+            candidates.append(Path(source))
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        try:
+            key = str(candidate.resolve()).lower()
+        except Exception:
+            key = str(candidate).lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(candidate)
+    return unique
+
+
+def resolve_codex_source() -> Optional[str]:
+    for candidate in _codex_candidate_paths():
+        try:
             if candidate.is_file():
                 return str(candidate)
+        except Exception:
+            continue
     return None
+
+
+def save_codex_override(path: str = "") -> None:
+    settings = load_settings()
+    settings["codexPath"] = str(path or "").strip()
+    save_settings(settings)
 
 
 def codex_command(source: str, args: list[str]) -> list[str]:
@@ -2095,27 +2150,114 @@ def codex_command(source: str, args: list[str]) -> list[str]:
 def codex_status() -> dict:
     source = resolve_codex_source()
     if not source:
-        return {"installed": False, "authenticated": False, "version": "", "source": None, "auth": ""}
+        return {
+            "installed": False, "working": False, "authenticated": False,
+            "version": "", "source": None, "auth": "", "error": "",
+        }
+
     version = ""
+    version_error = ""
+    try:
+        result = run_hidden(codex_command(source, ["--version"]), timeout=20)
+        output = f"{result.stdout}\n{result.stderr}".strip()
+        if result.returncode != 0:
+            version_error = output or f"codex --version saiu com código {result.returncode}"
+        else:
+            version = output.splitlines()[0] if output else "Codex"
+    except Exception as exc:
+        version_error = str(exc)
+
+    if version_error:
+        return {
+            "installed": True, "working": False, "authenticated": False,
+            "version": version or "Codex", "source": source, "auth": "",
+            "error": version_error,
+        }
+
     auth = ""
+    auth_code = 1
     try:
-        result = run_hidden(codex_command(source, ["--version"]), timeout=15)
-        version = (result.stdout or result.stderr).strip().splitlines()[0] if (result.stdout or result.stderr).strip() else "Codex"
-    except Exception:
-        version = "Codex"
-    try:
-        result = run_hidden(codex_command(source, ["login", "status"]), timeout=20)
+        result = run_hidden(codex_command(source, ["login", "status"]), timeout=25)
         auth = f"{result.stdout}\n{result.stderr}".strip()
+        auth_code = int(result.returncode)
     except Exception as exc:
         auth = str(exc)
-    authenticated = bool(re.search(r"logged in", auth, re.I)) and not bool(re.search(r"not logged in", auth, re.I))
+
+    negative = bool(re.search(
+        r"not\s+logged\s+in|not\s+authenticated|logged\s+out|unauthenticated|no\s+(?:valid\s+)?login",
+        auth, re.I,
+    ))
+    positive = bool(re.search(r"logged\s+in|authenticated|chatgpt", auth, re.I))
+    authenticated = (auth_code == 0 and not negative) or (positive and not negative)
+
     return {
         "installed": True,
+        "working": True,
         "authenticated": authenticated,
-        "version": version,
+        "version": version or "Codex",
         "source": source,
         "auth": auth,
+        "error": "",
     }
+
+
+def install_codex_official() -> tuple[bool, str]:
+    """Install the official standalone Codex CLI on Windows, without requiring Node/npm."""
+    if os.name != "nt":
+        return False, "A instalação automática desta versão está disponível no Windows."
+    script = (
+        "$ErrorActionPreference='Stop'; "
+        "$ProgressPreference='SilentlyContinue'; "
+        "$env:CODEX_NON_INTERACTIVE='1'; "
+        "irm https://chatgpt.com/codex/install.ps1 | iex"
+    )
+    try:
+        result = run_hidden([
+            "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-Command", script,
+        ], timeout=900)
+    except subprocess.TimeoutExpired:
+        return False, "A instalação do Codex demorou mais de 15 minutos."
+    except Exception as exc:
+        return False, str(exc)
+    output = f"{result.stdout}\n{result.stderr}".strip()
+    if result.returncode != 0:
+        return False, output[-2400:] or f"Instalador encerrou com código {result.returncode}."
+
+    source = resolve_codex_source()
+    if source:
+        try:
+            save_codex_override(source)
+        except Exception:
+            pass
+        return True, output[-1800:] if output else "Codex instalado."
+    return False, (
+        "O instalador terminou, mas o Vórtice ainda não encontrou codex.exe. "
+        "Use “Localizar Codex” ou reinicie o Vórtice."
+    )
+
+
+def launch_codex_interactive(args: list[str]) -> bool:
+    """Open Codex in a visible console for login/doctor flows."""
+    source = resolve_codex_source()
+    if not source or os.name != "nt":
+        return False
+    suffix = Path(source).suffix.lower()
+    flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+    try:
+        if suffix in {".cmd", ".bat"}:
+            line = subprocess.list2cmdline([source, *args])
+            subprocess.Popen(["cmd.exe", "/d", "/k", line], creationflags=flags)
+        elif suffix == ".ps1":
+            subprocess.Popen([
+                "powershell.exe", "-NoExit", "-ExecutionPolicy", "Bypass",
+                "-File", source, *args,
+            ], creationflags=flags)
+        else:
+            subprocess.Popen([source, *args], creationflags=flags)
+        return True
+    except Exception:
+        return False
 
 
 def bridge_schema() -> dict:
@@ -2805,7 +2947,7 @@ def run_nexo_agent(
 ) -> AgentRunResult:
     status = codex_status()
     if not status.get("installed"):
-        raise RuntimeError("Codex CLI não encontrado. O Vórtex usa o Codex local para operar o projeto.")
+        raise RuntimeError("Codex CLI não encontrado. Clique no status “Codex não encontrado · configurar” no topo para instalar ou localizar a CLI.")
     if not status.get("authenticated"):
         raise RuntimeError("Codex está instalado, mas sem login. Abra um terminal, rode codex e faça login.")
 
@@ -2968,7 +3110,7 @@ def prepare_with_codex(
     emit("checking", "Conferindo projeto, Codex e autenticação.")
     status = codex_status()
     if not status["installed"]:
-        raise RuntimeError("Codex CLI não encontrado. Instale o Codex e abra o Vórtice novamente.")
+        raise RuntimeError("Codex CLI não encontrado. Clique no status do Codex no topo e use “Instalar Codex oficial”.")
     if not status["authenticated"]:
         raise RuntimeError(
             "Codex CLI encontrado, mas você ainda não entrou com sua conta. "
@@ -4392,6 +4534,277 @@ class TaskTimelineDialog(tk.Toplevel):
         self.render()
 
 
+class CodexSetupDialog(tk.Toplevel):
+    """Small self-service setup/repair flow for the only required external dependency."""
+
+    def __init__(self, parent: "BridgeApp", *, onboarding: bool = False):
+        super().__init__(parent)
+        self.parent_app = parent
+        self.onboarding = bool(onboarding)
+        self.title("Primeiros passos · Codex" if self.onboarding else "Codex · configurar")
+        self.configure(bg=C["paper"])
+        self.minsize(680, 520)
+        center_window(self, 760, 610)
+        self.transient(parent)
+        self.status: dict = {}
+
+        body = tk.Frame(self, bg=C["paper"], padx=24, pady=22)
+        body.pack(fill="both", expand=True)
+
+        tk.Label(
+            body,
+            text="PRIMEIROS PASSOS" if self.onboarding else "DEPENDÊNCIA",
+            bg=C["paper"], fg=C["violet"], font=(FONT, 8, "bold"),
+        ).pack(anchor="w")
+        tk.Label(
+            body,
+            text="Vamos deixar o Codex pronto.",
+            bg=C["paper"], fg=C["ink"], font=(FONT, 20, "bold"),
+        ).pack(anchor="w", pady=(4, 4))
+        tk.Label(
+            body,
+            text=(
+                "Para COZINHAR CONTEXTO e usar o Vórtex, o Vórtice precisa da Codex CLI oficial. "
+                "No Setup do Vórtice você não precisa instalar Python. Git e VS Code são opcionais."
+            ),
+            bg=C["paper"], fg=C["muted"], font=(FONT, 9),
+            wraplength=690, justify="left",
+        ).pack(anchor="w", pady=(0, 14))
+
+        card = tk.Frame(
+            body, bg=C["card"], highlightbackground=C["line"], highlightthickness=1,
+            padx=16, pady=15,
+        )
+        card.pack(fill="x")
+
+        status_row = tk.Frame(card, bg=C["card"])
+        status_row.pack(fill="x")
+        self.dot = tk.Canvas(status_row, width=14, height=14, bg=C["card"], highlightthickness=0)
+        self.dot.pack(side="left", padx=(0, 7))
+        self.dot_id = self.dot.create_oval(2, 2, 12, 12, fill=C["muted"], outline="")
+        self.status_label = tk.Label(
+            status_row, text="Verificando Codex…", bg=C["card"], fg=C["muted"],
+            font=(FONT, 10, "bold"),
+        )
+        self.status_label.pack(side="left")
+
+        self.detail_label = tk.Label(
+            card, text="", bg=C["card"], fg=C["muted"], font=(MONO, 7),
+            wraplength=680, justify="left",
+        )
+        self.detail_label.pack(anchor="w", pady=(8, 12))
+
+        self.actions = tk.Frame(card, bg=C["card"])
+        self.actions.pack(fill="x")
+        self.install_btn = make_button(
+            self.actions, "⬇ Instalar Codex oficial", self.install_codex,
+            bg=C["violet"], fg=C["white"], active_bg="#6654E8",
+            font=(FONT, 8, "bold"), padx=12, pady=8,
+        )
+        self.install_btn.pack(side="left")
+        self.login_btn = make_button(
+            self.actions, "Entrar com ChatGPT", self.login_codex,
+            bg=C["lime"], fg=C["ink"], active_bg=C["lime_dark"],
+            font=(FONT, 8, "bold"), padx=12, pady=8,
+        )
+        self.login_btn.pack(side="left", padx=(7, 0))
+        self.verify_btn = make_button(
+            self.actions, "Verificar", self.refresh_async,
+            bg="#F2EEE7", fg=C["muted"], active_bg="#E9E4DA",
+            font=(FONT, 8, "bold"), padx=10, pady=8,
+        )
+        self.verify_btn.pack(side="left", padx=(7, 0))
+
+        actions2 = tk.Frame(card, bg=C["card"])
+        actions2.pack(fill="x", pady=(8, 0))
+        make_button(
+            actions2, "Localizar codex.exe", self.locate_codex,
+            bg=C["card"], fg=C["violet"], active_bg=C["violet_soft"],
+            font=(FONT, 7, "bold"), padx=8, pady=6,
+        ).pack(side="left")
+        self.doctor_btn = make_button(
+            actions2, "Codex doctor", self.doctor_codex,
+            bg=C["card"], fg=C["violet"], active_bg=C["violet_soft"],
+            font=(FONT, 7, "bold"), padx=8, pady=6,
+        )
+        self.doctor_btn.pack(side="left", padx=(5, 0))
+        make_button(
+            actions2, "Documentação oficial", self.open_docs,
+            bg=C["card"], fg=C["muted"], active_bg="#F1EEE8",
+            font=(FONT, 7, "bold"), padx=8, pady=6,
+        ).pack(side="left", padx=(5, 0))
+
+        tips = tk.Frame(body, bg=C["paper"], pady=14)
+        tips.pack(fill="x")
+        tk.Label(
+            tips, text="Depois disso é simples:", bg=C["paper"], fg=C["ink"],
+            font=(FONT, 9, "bold"),
+        ).pack(anchor="w")
+        tk.Label(
+            tips,
+            text=(
+                "1. Adicione seu projeto.  2. Crie uma Task.  "
+                "3. COZINHAR CONTEXTO.  4. MANDAR PRO GPT.  "
+                "5. Traga o ZIP e homologue."
+            ),
+            bg=C["paper"], fg=C["muted"], font=(FONT, 8),
+            wraplength=700, justify="left",
+        ).pack(anchor="w", pady=(5, 0))
+
+        self.feedback = tk.Label(
+            body, text="", bg=C["paper"], fg=C["muted"], font=(FONT, 8),
+            wraplength=700, justify="left",
+        )
+        self.feedback.pack(anchor="w", pady=(0, 10))
+
+        footer = tk.Frame(body, bg=C["paper"])
+        footer.pack(fill="x", side="bottom")
+        self.finish_btn = make_button(
+            footer, "Começar a usar o Vórtice", self.finish,
+            bg=C["ink"], fg=C["white"], active_bg="#303030",
+            font=(FONT, 8, "bold"), padx=16, pady=9,
+        )
+        self.finish_btn.pack(side="right")
+        self.protocol("WM_DELETE_WINDOW", self.finish)
+        self.bind("<Escape>", lambda _e: self.finish())
+
+        self.refresh_async()
+
+    def _set_busy(self, busy: bool, message: str = "") -> None:
+        state = "disabled" if busy else "normal"
+        for btn in (self.install_btn, self.login_btn, self.verify_btn, self.doctor_btn):
+            try:
+                btn.configure(state=state)
+            except Exception:
+                pass
+        if message:
+            self.feedback.configure(text=message)
+
+    def refresh_async(self) -> None:
+        self._set_busy(True, "Conferindo a instalação e o login…")
+        self.status_label.configure(text="Verificando Codex…", fg=C["muted"])
+        self.dot.itemconfigure(self.dot_id, fill=C["muted"])
+
+        def worker():
+            try:
+                status = codex_status()
+            except Exception as exc:
+                status = {
+                    "installed": False, "working": False, "authenticated": False,
+                    "version": "", "source": None, "error": str(exc),
+                }
+            self.after(0, lambda: self.apply_status(status))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def apply_status(self, status: dict) -> None:
+        self.status = dict(status or {})
+        installed = bool(status.get("installed"))
+        working = bool(status.get("working", installed))
+        authenticated = bool(status.get("authenticated"))
+        source = str(status.get("source") or "")
+        error = str(status.get("error") or "")
+
+        if installed and working and authenticated:
+            self.dot.itemconfigure(self.dot_id, fill=C["green"])
+            self.status_label.configure(
+                text=f"{status.get('version') or 'Codex'} · pronto ✓", fg=C["green"],
+            )
+            detail = f"Login OK\n{source}"
+            self.feedback.configure(text="Tudo pronto. Agora o Vórtice consegue cozinhar contexto e usar o Vórtex.", fg=C["green"])
+        elif installed and working:
+            self.dot.itemconfigure(self.dot_id, fill=C["peach"])
+            self.status_label.configure(text="Codex instalado · falta entrar", fg=C["peach"])
+            detail = f"{status.get('version') or 'Codex'}\n{source}"
+            self.feedback.configure(text="Clique em “Entrar com ChatGPT”, finalize no navegador e depois clique em Verificar.", fg=C["muted"])
+        elif installed:
+            self.dot.itemconfigure(self.dot_id, fill=C["red"])
+            self.status_label.configure(text="Codex encontrado, mas não abriu", fg=C["red"])
+            detail = f"{source}\n{error}".strip()
+            self.feedback.configure(text="Use Codex doctor ou reinstale pelo botão oficial abaixo.", fg=C["red"])
+        else:
+            self.dot.itemconfigure(self.dot_id, fill=C["red"])
+            self.status_label.configure(text="Codex não encontrado", fg=C["red"])
+            detail = "A Codex CLI ainda não está disponível para o Vórtice."
+            self.feedback.configure(text="Pode instalar daqui mesmo. O instalador é o standalone oficial da OpenAI.", fg=C["muted"])
+
+        self.detail_label.configure(text=detail)
+        self.install_btn.configure(text="↻ Reinstalar Codex oficial" if installed else "⬇ Instalar Codex oficial")
+        self.login_btn.configure(state=("normal" if installed and working and not authenticated else "disabled"))
+        self.doctor_btn.configure(state=("normal" if installed and working else "disabled"))
+        self.install_btn.configure(state="normal")
+        self.verify_btn.configure(state="normal")
+        try:
+            self.parent_app.refresh_codex_status_async()
+        except Exception:
+            pass
+
+    def install_codex(self) -> None:
+        if os.name != "nt":
+            messagebox.showinfo(APP_NAME, "A instalação automática está disponível no Windows.", parent=self)
+            return
+        self._set_busy(True, "Baixando e instalando a Codex CLI oficial… pode levar um pouquinho.")
+
+        def worker():
+            ok, output = install_codex_official()
+            self.after(0, lambda: self._install_done(ok, output))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _install_done(self, ok: bool, output: str) -> None:
+        if ok:
+            self.feedback.configure(text="Codex instalado ✓ Agora falta entrar com sua conta do ChatGPT.", fg=C["green"])
+        else:
+            messagebox.showerror(
+                APP_NAME,
+                "Não consegui concluir a instalação automática.\n\n" + str(output or "Erro desconhecido."),
+                parent=self,
+            )
+        self.refresh_async()
+
+    def login_codex(self) -> None:
+        if not launch_codex_interactive(["login"]):
+            messagebox.showerror(APP_NAME, "Não consegui abrir o login do Codex.", parent=self)
+            return
+        self.feedback.configure(
+            text="Abri o login do Codex em uma janela separada. Termine no navegador e volte aqui em Verificar.",
+            fg=C["violet"],
+        )
+
+    def doctor_codex(self) -> None:
+        if not launch_codex_interactive(["doctor"]):
+            messagebox.showerror(APP_NAME, "Não consegui abrir o Codex doctor.", parent=self)
+
+    def locate_codex(self) -> None:
+        initial = Path(os.environ.get("LOCALAPPDATA") or Path.home())
+        chosen = filedialog.askopenfilename(
+            parent=self,
+            title="Localizar a Codex CLI",
+            initialdir=str(initial) if initial.exists() else None,
+            filetypes=[("Codex CLI", "codex.exe codex.cmd codex.ps1"), ("Todos", "*.*")],
+        )
+        if not chosen:
+            return
+        save_codex_override(chosen)
+        self.feedback.configure(text="Caminho salvo. Verificando…", fg=C["violet"])
+        self.refresh_async()
+
+    def open_docs(self) -> None:
+        webbrowser.open_new_tab("https://developers.openai.com/codex/cli")
+
+    def finish(self) -> None:
+        if self.onboarding:
+            settings = load_settings()
+            settings["publicWelcomeShown"] = True
+            settings["publicWelcomeVersion"] = APP_VERSION
+            try:
+                save_settings(settings)
+                self.parent_app.settings = load_settings()
+            except Exception:
+                pass
+        self.destroy()
+
+
 class SettingsDialog(tk.Toplevel):
     def __init__(self, parent: "BridgeApp"):
         super().__init__(parent)
@@ -4417,7 +4830,7 @@ class SettingsDialog(tk.Toplevel):
         tk.Label(body, text="Só o que importa fica na frente.", bg=C["paper"], fg=C["ink"], font=(FONT, 19, "bold")).pack(anchor="w", pady=(4,2))
         nav = tk.Frame(body, bg=C["paper"]); nav.pack(fill="x", pady=(12,10))
         self.nav_buttons = {}
-        for key, label in [("general","Geral"),("automation","Automação"),("skills","Skills"),("project","Projeto"),("advanced","Avançado")]:
+        for key, label in [("dependencies","Dependências"),("general","Geral"),("automation","Automação"),("skills","Skills"),("project","Projeto"),("advanced","Avançado")]:
             btn = make_button(nav, label, lambda k=key:self.show_page(k), bg="#EEEAE2", fg=C["muted"], active_bg=C["violet_soft"], font=(FONT, 8, "bold"), padx=10, pady=6)
             btn.pack(side="left", padx=(0,5)); self.nav_buttons[key]=btn
         self.host = tk.Frame(body, bg=C["paper"]); self.host.pack(fill="both", expand=True)
@@ -4425,7 +4838,7 @@ class SettingsDialog(tk.Toplevel):
         make_button(footer, "Fechar", self.close_and_save, bg=C["ink"], fg=C["white"], active_bg="#303030", font=(FONT, 8, "bold"), padx=16, pady=8).pack(side="right")
         self.protocol("WM_DELETE_WINDOW", self.close_and_save)
         self.bind("<Escape>", lambda _e:self.close_and_save())
-        self.show_page("general")
+        self.show_page("dependencies")
 
     def show_page(self, page: str) -> None:
         self._save_project_page_if_present()
@@ -4433,7 +4846,8 @@ class SettingsDialog(tk.Toplevel):
         for key, btn in self.nav_buttons.items():
             btn.configure(bg=C["violet_soft"] if key==page else "#EEEAE2", fg=C["violet"] if key==page else C["muted"])
         scroll=ScrollFrame(self.host,C["paper"]); scroll.pack(fill="both",expand=True)
-        if page=="general": self._render_general(scroll.inner)
+        if page=="dependencies": self._render_dependencies(scroll.inner)
+        elif page=="general": self._render_general(scroll.inner)
         elif page=="automation": self._render_automation(scroll.inner)
         elif page=="skills": self._render_skills(scroll.inner)
         elif page=="project": self._render_project(scroll.inner)
@@ -4445,6 +4859,20 @@ class SettingsDialog(tk.Toplevel):
         if desc: tk.Label(card,text=desc,bg=C["card"],fg=C["muted"],font=(FONT,8),wraplength=710,justify="left").pack(anchor="w",pady=(3,9))
         return card
 
+    def _render_dependencies(self,parent):
+        source = resolve_codex_source()
+        if source:
+            title = "CODEX · ENCONTRADO"
+            desc = f"O Vórtice encontrou uma instalação local em:\n{source}\n\nAbra o assistente para validar versão e login sem travar esta tela."
+        else:
+            title = "CODEX · NÃO ENCONTRADO"
+            desc = "É a única dependência obrigatória para COZINHAR CONTEXTO e para o agente Vórtex."
+        c=self._card(parent,title,desc)
+        make_button(c,"Configurar / reparar Codex",lambda:self.parent_app.open_codex_setup(False),bg=C["violet"],fg=C["white"],active_bg="#6654E8",font=(FONT,8,"bold"),padx=11,pady=7).pack(anchor="w")
+        tk.Label(c,text="O Vórtice usa o instalador standalone oficial da OpenAI: não precisa instalar Node/npm só por causa dele.",bg=C["card"],fg=C["muted"],font=(FONT,8),wraplength=710,justify="left").pack(anchor="w",pady=(9,0))
+        c2=self._card(parent,"O QUE MAIS EU PRECISO?","Nada obrigatório para abrir o Vórtice. Git e VS Code são opcionais; Python já vem embutido no Setup/Portable.")
+        tk.Label(c2,text="ChatGPT continua no navegador. Se o Codex estiver verde no topo, o fluxo principal já está pronto.",bg=C["card"],fg=C["ink"],font=(FONT,8),wraplength=710,justify="left").pack(anchor="w")
+
     def _render_general(self,parent):
         c=self._card(parent,"VÓRTEX · LEMBRETES","O mascote e os sons continuam engraçadinhos; aqui você só decide se eles podem te cutucar.")
         tk.Checkbutton(c,text="Mostrar notificações quando alguma coisa terminar",variable=self.notifications_var,bg=C["card"],fg=C["ink"],activebackground=C["card"],selectcolor=C["white"],font=(FONT,8)).pack(anchor="w",pady=3)
@@ -4454,12 +4882,11 @@ class SettingsDialog(tk.Toplevel):
         tk.Label(c2,text="Edite as palavras do projeto na aba Projeto. Ex.: ‘select móvel’ → ‘SelectMovel’.",bg=C["card"],fg=C["ink"],font=(FONT,8)).pack(anchor="w")
 
     def _render_automation(self,parent):
-        c=self._card(parent,"CHATGPT · FLUXO ASSISTIDO","A edição pública prepara prompt, CONTEXTO.zip e anexos, abre o ChatGPT e mantém Task/Rodada/histórico. Você confirma o envio e devolve o ZIP ao Vórtice.")
+        c=self._card(parent,"CHATGPT · FLUXO ASSISTIDO","Na edição pública este é o modo disponível. Não há uma opção falsa para trocar de modo: o Vórtice prepara prompt, CONTEXTO.zip e anexos, abre o ChatGPT e mantém Task/Rodada/histórico.")
         self.automation_var.set("assist")
-        row=tk.Frame(c,bg=C["card"]); row.pack(fill="x",pady=2)
-        tk.Radiobutton(row,text="Assistido",variable=self.automation_var,value="assist",bg=C["card"],fg=C["ink"],activebackground=C["card"],selectcolor=C["white"],font=(FONT,8,"bold")).pack(side="left")
-        tk.Label(row,text="prepara tudo; você confere/envia e devolve o ZIP",bg=C["card"],fg=C["muted"],font=(FONT,7)).pack(side="left",padx=(8,0))
-        tk.Label(c,text="O protocolo RESULT_TOKEN continua protegendo Task/Rodada quando você aplica o resultado.",bg=C["card"],fg=C["muted"],font=(FONT,8),wraplength=710,justify="left").pack(anchor="w",pady=(10,0))
+        badge=tk.Label(c,text="  ASSISTIDO · ATIVO  ",bg=C["lime"],fg=C["ink"],font=(FONT,8,"bold"),padx=6,pady=5)
+        badge.pack(anchor="w")
+        tk.Label(c,text="Você confirma o envio no ChatGPT e devolve o ZIP ao Vórtice. O protocolo RESULT_TOKEN protege Task/Rodada quando o resultado é aplicado.",bg=C["card"],fg=C["muted"],font=(FONT,8),wraplength=710,justify="left").pack(anchor="w",pady=(10,0))
 
     def _render_skills(self,parent):
         self.global_box=self._skill_section(parent,"SKILLS GLOBAIS","Regras que entram em qualquer projeto.",None)
@@ -4592,8 +5019,12 @@ class SettingsDialog(tk.Toplevel):
         except Exception:pass
     def close_and_save(self):
         self._save_project_page_if_present()
-        self.settings["agentName"]="Vórtex"; self.settings["autoRollback"]=bool(self.auto_rollback.get()); self.settings["notificationsEnabled"]=bool(self.notifications_var.get()); self.settings["soundsEnabled"]=bool(self.sounds_var.get()); self.settings["agentModel"]=self.model_var.get().strip(); self.settings["automationMode"]=("assist" if PUBLIC_RELEASE else (self.automation_var.get().strip() or "assist")); self.settings["autopilotRetry"]=(False if PUBLIC_RELEASE else bool(self.autopilot_retry_var.get()))
-        save_settings(self.settings); self.parent_app.settings=load_settings(); self.parent_app.refresh_agent_header(); self.destroy()
+        # Reload first so changes made by the dependency assistant (for example
+        # codexPath) are not overwritten by this dialog's older snapshot.
+        latest = load_settings()
+        latest["agentName"]="Vórtex"; latest["autoRollback"]=bool(self.auto_rollback.get()); latest["notificationsEnabled"]=bool(self.notifications_var.get()); latest["soundsEnabled"]=bool(self.sounds_var.get()); latest["agentModel"]=self.model_var.get().strip(); latest["automationMode"]=("assist" if PUBLIC_RELEASE else (self.automation_var.get().strip() or "assist")); latest["autopilotRetry"]=(False if PUBLIC_RELEASE else bool(self.autopilot_retry_var.get()))
+        self.settings = latest
+        save_settings(latest); self.parent_app.settings=load_settings(); self.parent_app.refresh_agent_header(); self.destroy()
 
 
 class BridgeApp(tk.Tk):
@@ -4688,25 +5119,18 @@ class BridgeApp(tk.Tk):
             self.after(650, self.show_public_welcome_if_needed)
 
     def show_public_welcome_if_needed(self) -> None:
-        if not PUBLIC_RELEASE or bool(self.settings.get("publicWelcomeShown", False)):
+        if not PUBLIC_RELEASE:
             return
-        self.settings["publicWelcomeShown"] = True
+        shown_version = str(self.settings.get("publicWelcomeVersion") or "").strip()
+        if shown_version == APP_VERSION:
+            return
+        self.open_codex_setup(True)
+
+    def open_codex_setup(self, onboarding: bool = False) -> None:
         try:
-            save_settings(self.settings)
-        except Exception:
-            pass
-        messagebox.showinfo(
-            f"{APP_NAME} · {APP_EDITION}",
-            "Bem-vindo ao Vórtice! ✦\n\n"
-            "1. Adicione a pasta do seu projeto.\n"
-            "2. Crie uma Task e descreva o que quer fazer.\n"
-            "3. COZINHAR CONTEXTO prepara só o necessário.\n"
-            "4. MANDAR PRO GPT abre o handoff assistido.\n"
-            "5. Traga o ZIP final e o Vórtice valida, cria backup e aplica.\n\n"
-            "Tudo que é seu fica local em %LOCALAPPDATA%\\Vortice.\n"
-            "Divirta-se — e o Vórtex avisa quando alguma coisa terminar 😭",
-            parent=self,
-        )
+            CodexSetupDialog(self, onboarding=onboarding)
+        except Exception as exc:
+            messagebox.showerror(APP_NAME, f"Não consegui abrir o assistente do Codex.\n\n{exc}", parent=self)
 
     # ----------------------------- layout -----------------------------
 
@@ -4751,9 +5175,9 @@ class BridgeApp(tk.Tk):
         self.codex_status_label.pack(side="left")
         # Kept for internal updates; the visible token dashboard lives permanently in the main screen.
         self.codex_usage_label = tk.Label(status_frame, text="", bg=C["card"], fg=C["muted"], font=(MONO, 1))
-        status_frame.bind("<Button-1>", lambda _e: self.refresh_codex_status_async())
-        self.codex_status_label.bind("<Button-1>", lambda _e: self.refresh_codex_status_async())
-        self.codex_dot.bind("<Button-1>", lambda _e: self.refresh_codex_status_async())
+        status_frame.bind("<Button-1>", lambda _e: self.open_codex_setup(False))
+        self.codex_status_label.bind("<Button-1>", lambda _e: self.open_codex_setup(False))
+        self.codex_dot.bind("<Button-1>", lambda _e: self.open_codex_setup(False))
 
         body = tk.Frame(self, bg=C["paper"])
         body.pack(fill="both", expand=True, padx=16, pady=(0, 16))
@@ -6895,14 +7319,20 @@ class BridgeApp(tk.Tk):
         threading.Thread(target=worker, daemon=True).start()
 
     def apply_codex_status(self, status: dict) -> None:
-        if status.get("installed") and status.get("authenticated"):
+        installed = bool(status.get("installed"))
+        working = bool(status.get("working", installed))
+        authenticated = bool(status.get("authenticated"))
+        if installed and working and authenticated:
             self.codex_status_label.configure(text=status.get("version") or "Codex pronto", fg=C["green"])
             self.codex_dot.itemconfigure(self.codex_dot_id, fill=C["green"])
-        elif status.get("installed"):
-            self.codex_status_label.configure(text="Codex sem login", fg=C["peach"])
+        elif installed and working:
+            self.codex_status_label.configure(text="Codex sem login · configurar", fg=C["peach"])
             self.codex_dot.itemconfigure(self.codex_dot_id, fill=C["peach"])
+        elif installed:
+            self.codex_status_label.configure(text="Codex precisa de reparo · configurar", fg=C["red"])
+            self.codex_dot.itemconfigure(self.codex_dot_id, fill=C["red"])
         else:
-            self.codex_status_label.configure(text="Codex não encontrado", fg=C["red"])
+            self.codex_status_label.configure(text="Codex não encontrado · configurar", fg=C["red"])
             self.codex_dot.itemconfigure(self.codex_dot_id, fill=C["red"])
 
     def refresh_rate_limits_async(self) -> None:

@@ -1,5 +1,5 @@
 #define MyAppName "Vórtice"
-#define MyAppVersion "4.4.0"
+#define MyAppVersion "4.4.1"
 #define MyAppPublisher "joao-araujoo"
 #define MyAppURL "https://github.com/joao-araujoo/vortice"
 #define MyAppExeName "Vortice.exe"
@@ -27,7 +27,7 @@ WizardStyle=modern
 LicenseFile=..\LICENSE
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-VersionInfoVersion=4.4.0.0
+VersionInfoVersion=4.4.1.0
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription=Instalador do Vórtice
 VersionInfoProductName={#MyAppName}

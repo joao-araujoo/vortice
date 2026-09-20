@@ -26,7 +26,7 @@ O script:
 4. cria `joao-araujoo/vortice` como repositório público se ainda não existir;
 5. faz o primeiro commit e push;
 6. configura descrição/topics;
-7. cria e envia a tag `v4.4.0`;
+7. cria e envia a tag `v4.4.1`;
 8. a tag dispara `.github/workflows/release.yml`;
 9. o GitHub gera `Vortice-Setup.exe`, `Vortice-Portable.zip` e checksums automaticamente.
 
@@ -40,7 +40,7 @@ gh auth login --web --git-protocol https
 git init
 git branch -M main
 git add .
-git commit -m "chore: Vórtice 4.4.0 Public Beta"
+git commit -m "chore: Vórtice 4.4.1 Public Beta"
 
 gh repo create vortice --public `
   --description "Vórtice — orquestrador desktop local-first para desenvolvimento com Tasks, contexto, backups e ChatGPT."
@@ -56,8 +56,8 @@ git push -u origin main
 gh repo edit joao-araujoo/vortice --enable-issues=true --enable-wiki=false `
   --add-topic vortice --add-topic developer-tools --add-topic chatgpt --add-topic codex --add-topic windows --add-topic productivity
 
-git tag -a v4.4.0 -m "Vórtice 4.4.0 Public Beta"
-git push origin v4.4.0
+git tag -a v4.4.1 -m "Vórtice 4.4.1 Public Beta"
+git push origin v4.4.1
 ```
 
 Depois acompanhe:

@@ -5,8 +5,10 @@
   "notificationsEnabled": true,
   "soundsEnabled": true,
   "automationMode": "assist",
-  "companionToken": "",
+  "companionToken": "3317b1ffdb0f47328ce8c117bee93616",
   "autopilotRetry": false,
   "publicWelcomeShown": false,
+  "publicWelcomeVersion": "",
+  "codexPath": "",
   "publicRelease": true
 }

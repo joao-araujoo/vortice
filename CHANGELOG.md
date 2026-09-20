@@ -1,5 +1,17 @@
 # Changelog
 
+## 4.4.1 — Public Beta
+
+- onboarding de primeira execução agora configura a Codex CLI;
+- instalação standalone oficial pelo próprio Vórtice;
+- login com ChatGPT e `codex doctor` acessíveis pela interface;
+- detecção ampliada de caminhos do Codex no Windows;
+- fallback manual para localizar `codex.exe`;
+- nova aba Config → Dependências;
+- status do Codex no header abre o reparador;
+- tela pública de Automação simplificada para não sugerir controles indisponíveis;
+- correções de mensagens e diagnóstico para máquinas novas.
+
 ## 4.4.0 — Public Beta
 
 - primeira distribuição preparada para GitHub Releases;

@@ -2,45 +2,67 @@
 setlocal EnableExtensions
 cls
 echo =====================================================
-echo   VORTICE - INSTALAR CODEX CLI OFICIAL
+echo   VORTICE - CONFIGURAR CODEX CLI OFICIAL
 echo =====================================================
 echo.
 
 where codex >nul 2>nul
-if %errorlevel%==0 (
-  echo Codex ja foi encontrado neste computador.
-  codex --version
+if %errorlevel%==0 goto :verificar
+
+echo Instalando a Codex CLI standalone oficial da OpenAI...
+echo Nao e necessario instalar Node ou npm para este metodo.
+echo.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; $env:CODEX_NON_INTERACTIVE='1'; irm https://chatgpt.com/codex/install.ps1 ^| iex"
+if errorlevel 1 goto :falha
+
+:verificar
+echo.
+echo Verificando...
+set "CODEX_EXE=%LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe"
+if exist "%CODEX_EXE%" (
+  "%CODEX_EXE%" --version
   echo.
-  echo Status da conta:
-  codex login status
-  echo.
+  "%CODEX_EXE%" login status >nul 2>nul
+  if errorlevel 1 goto :login
+  echo Codex pronto e autenticado.
   pause
   exit /b 0
 )
 
-echo O instalador oficial da OpenAI sera executado pelo PowerShell.
-echo.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "irm https://chatgpt.com/codex/install.ps1 ^| iex"
-if errorlevel 1 goto :falha
-
-echo.
-echo Instalacao concluida.
-echo.
-echo Feche e abra um novo PowerShell e execute:
-echo.
-echo   codex
-echo.
-echo Depois escolha Sign in with ChatGPT.
-echo.
+where codex >nul 2>nul
+if errorlevel 1 goto :naoencontrado
+codex --version
+codex login status >nul 2>nul
+if errorlevel 1 goto :login
+echo Codex pronto e autenticado.
 pause
 exit /b 0
 
+:login
+echo.
+echo Falta entrar com a sua conta do ChatGPT.
+echo Uma janela do Codex sera aberta agora.
+echo.
+if exist "%CODEX_EXE%" (
+  start "" "%CODEX_EXE%" login
+) else (
+  start "" cmd /k codex login
+)
+echo Depois de terminar o login, abra o Vortice e clique em Verificar.
+pause
+exit /b 0
+
+:naoencontrado
+echo.
+echo O instalador terminou, mas codex.exe ainda nao foi localizado.
+echo Abra o Vortice ^> Config ^> Dependencias ^> Configurar / reparar Codex.
+echo La voce tambem pode localizar codex.exe manualmente.
+pause
+exit /b 1
+
 :falha
 echo.
-echo A instalacao do Codex falhou. Veja a mensagem acima.
-echo Como alternativa oficial, se voce ja tiver npm:
-echo.
-echo   npm install -g @openai/codex
-echo.
+echo A instalacao oficial do Codex falhou. Veja a mensagem acima.
+echo Documentacao: https://developers.openai.com/codex/cli
 pause
 exit /b 1

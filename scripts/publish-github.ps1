@@ -1,6 +1,6 @@
 param(
   [string]$RepoName = "vortice",
-  [string]$Version = "v4.4.0"
+  [string]$Version = "v4.4.1"
 )
 
 $ErrorActionPreference = "Stop"
@@ -123,35 +123,13 @@ if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($owner)) {
 }
 Write-Host "GitHub: $owner" -ForegroundColor Green
 
-if (-not (Test-Path -LiteralPath ".git" -PathType Container)) {
-  Run-Checked -Exe $script:git -Arguments @("init") -ErrorMessage "Falha ao inicializar o Git"
-}
-Run-Checked -Exe $script:git -Arguments @("branch", "-M", "main") -ErrorMessage "Falha ao definir a branch main"
-
-# Keep commit identity local to this repository.
-$name = Get-GitOutput -Arguments @("config", "--get", "user.name")
-$email = Get-GitOutput -Arguments @("config", "--get", "user.email")
-if ([string]::IsNullOrWhiteSpace($name)) {
-  Run-Checked -Exe $script:git -Arguments @("config", "user.name", $owner) -ErrorMessage "Falha ao configurar git user.name"
-}
-if ([string]::IsNullOrWhiteSpace($email)) {
-  Run-Checked -Exe $script:git -Arguments @("config", "user.email", "$owner@users.noreply.github.com") -ErrorMessage "Falha ao configurar git user.email"
-}
-
-Run-Checked -Exe $script:git -Arguments @("add", "-A") -ErrorMessage "Falha ao preparar os arquivos para commit"
-& $script:git diff --cached --quiet
-$hasChanges = ($LASTEXITCODE -ne 0)
-if ($hasChanges) {
-  Run-Checked -Exe $script:git -Arguments @("commit", "-m", "chore: Vortice 4.4.0 Public Beta") -ErrorMessage "Falha ao criar o commit"
-}
-
-# Make sure there is at least one commit before trying to push.
-$head = Get-GitOutput -Arguments @("rev-parse", "--verify", "HEAD")
-if ([string]::IsNullOrWhiteSpace($head)) {
-  throw "Nenhum commit local foi criado. Verifique se a pasta contem os arquivos do Vortice."
-}
 
 $full = "$owner/$RepoName"
+$expectedOrigin = "https://github.com/$full.git"
+
+# Discover/create the remote repository before creating the local commit. This is
+# important when publishing an update from a freshly extracted GitHubReady ZIP:
+# the folder has no .git history, while the GitHub repository already has main.
 $oldPreference = $ErrorActionPreference
 $ErrorActionPreference = "SilentlyContinue"
 & $gh repo view $full --json name *> $null
@@ -166,17 +144,31 @@ if (-not $repoExists) {
     "--description", "Vortice - desktop local-first para desenvolvimento com Tasks, contexto, backups e ChatGPT."
   ) -ErrorMessage "Falha ao criar o repositorio no GitHub"
 } else {
-  Write-Host "Repositorio $full ja existe. Vou reaproveitar e corrigir o remote se precisar." -ForegroundColor Yellow
+  Write-Host "Repositorio $full ja existe. Vou atualizar preservando o historico." -ForegroundColor Yellow
 }
 
-# Repair origin safely. Do not call `git remote get-url origin` until we know origin exists,
-# because Windows PowerShell 5.1 can turn native stderr into a terminating error.
+if (-not (Test-Path -LiteralPath ".git" -PathType Container)) {
+  Run-Checked -Exe $script:git -Arguments @("init") -ErrorMessage "Falha ao inicializar o Git"
+}
+Run-Checked -Exe $script:git -Arguments @("branch", "-M", "main") -ErrorMessage "Falha ao definir a branch main"
+
+# Keep commit identity and line-ending behavior local to this repository.
+$name = Get-GitOutput -Arguments @("config", "--get", "user.name")
+$email = Get-GitOutput -Arguments @("config", "--get", "user.email")
+if ([string]::IsNullOrWhiteSpace($name)) {
+  Run-Checked -Exe $script:git -Arguments @("config", "user.name", $owner) -ErrorMessage "Falha ao configurar git user.name"
+}
+if ([string]::IsNullOrWhiteSpace($email)) {
+  Run-Checked -Exe $script:git -Arguments @("config", "user.email", "$owner@users.noreply.github.com") -ErrorMessage "Falha ao configurar git user.email"
+}
+Run-Checked -Exe $script:git -Arguments @("config", "core.autocrlf", "false") -ErrorMessage "Falha ao configurar line endings do repositorio"
+
+# Repair origin safely. Never query origin before checking whether it exists.
 $remoteNamesText = Get-GitOutput -Arguments @("remote")
 $remoteNames = @()
 if (-not [string]::IsNullOrWhiteSpace($remoteNamesText)) {
   $remoteNames = @($remoteNamesText -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 }
-$expectedOrigin = "https://github.com/$full.git"
 if ($remoteNames -notcontains "origin") {
   Write-Host "Remote origin ausente. Adicionando $expectedOrigin" -ForegroundColor Cyan
   Run-Checked -Exe $script:git -Arguments @("remote", "add", "origin", $expectedOrigin) -ErrorMessage "Falha ao adicionar o remote origin"
@@ -188,6 +180,32 @@ if ($remoteNames -notcontains "origin") {
     Write-Host "Atualizando remote origin para $expectedOrigin" -ForegroundColor Yellow
     Run-Checked -Exe $script:git -Arguments @("remote", "set-url", "origin", $expectedOrigin) -ErrorMessage "Falha ao atualizar o remote origin"
   }
+}
+
+# If main already exists on GitHub, make that commit the parent of this package
+# WITHOUT checking it out over the extracted files. `reset --mixed` moves HEAD
+# to origin/main but deliberately keeps the current package in the working tree.
+# This turns a fresh GitHubReady ZIP into a normal fast-forward update and also
+# repairs folders left in the unrelated-root state by older publisher versions.
+$remoteMain = Get-GitOutput -Arguments @("ls-remote", "--heads", "origin", "refs/heads/main")
+if (-not [string]::IsNullOrWhiteSpace($remoteMain)) {
+  Write-Host "Sincronizando com origin/main sem sobrescrever os arquivos desta versao..." -ForegroundColor Cyan
+  Run-Checked -Exe $script:git -Arguments @("fetch", "origin", "main") -ErrorMessage "Falha ao buscar origin/main"
+  Run-Checked -Exe $script:git -Arguments @("reset", "--mixed", "origin/main") -ErrorMessage "Falha ao alinhar o historico local com origin/main"
+}
+
+Run-Checked -Exe $script:git -Arguments @("add", "-A") -ErrorMessage "Falha ao preparar os arquivos para commit"
+& $script:git diff --cached --quiet
+$hasChanges = ($LASTEXITCODE -ne 0)
+if ($hasChanges) {
+  Run-Checked -Exe $script:git -Arguments @("commit", "-m", "chore: Vortice 4.4.1 Public Beta") -ErrorMessage "Falha ao criar o commit"
+} else {
+  Write-Host "Nenhuma alteracao de arquivos para commitar. Continuando com o HEAD atual." -ForegroundColor DarkGray
+}
+
+$head = Get-GitOutput -Arguments @("rev-parse", "--verify", "HEAD")
+if ([string]::IsNullOrWhiteSpace($head)) {
+  throw "Nenhum commit local foi encontrado. Verifique se a pasta contem os arquivos do Vortice."
 }
 
 Write-Host "Enviando main..." -ForegroundColor Cyan
@@ -224,7 +242,7 @@ if (-not [string]::IsNullOrWhiteSpace($remoteTagText)) {
   }
 
   if ([string]::IsNullOrWhiteSpace($localTagText)) {
-    Run-Checked -Exe $script:git -Arguments @("tag", "-a", $Version, "-m", "Vortice 4.4.0 Public Beta") -ErrorMessage "Falha ao criar a tag $Version"
+    Run-Checked -Exe $script:git -Arguments @("tag", "-a", $Version, "-m", "Vortice 4.4.1 Public Beta") -ErrorMessage "Falha ao criar a tag $Version"
   }
   Run-Checked -Exe $script:git -Arguments @("push", "origin", $Version) -ErrorMessage "Falha ao enviar a tag $Version"
 }
